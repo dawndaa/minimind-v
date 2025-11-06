@@ -9,6 +9,17 @@ from trainer.trainer_utils import setup_seed
 warnings.filterwarnings('ignore')
 
 def init_model(args):
+    """根据权重格式加载 tokenizer 与 VLM 模型。
+
+    Args:
+        args (argparse.Namespace): 命令行参数集合。
+
+    Returns:
+        Tuple[torch.nn.Module, transformers.PreTrainedTokenizer, CLIPProcessor]:
+        - 已置于 eval 模式的模型。
+        - 对应 tokenizer。
+        - 图像预处理器。
+    """
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
     if 'model' in args.load_from:
         moe_suffix = '_moe' if args.use_moe else ''
@@ -29,6 +40,7 @@ def init_model(args):
 
 
 def main():
+    """命令行入口，用于执行 MiniMind-VLM 推理。"""
     parser = argparse.ArgumentParser(description="MiniMind-V Chat")
     parser.add_argument('--load_from', default='model', type=str, help="模型加载路径（model=原生torch权重，其他路径=transformers格式）")
     parser.add_argument('--save_dir', default='out', type=str, help="模型权重目录")
@@ -59,7 +71,8 @@ def main():
             inputs = tokenizer(inputs_text, return_tensors="pt", truncation=True).to(args.device)
             
             print(f'[图像]: {image_file}')
-            print(f'👶: {prompt.replace('\n', '\\n')}')
+            prompt_display = prompt.replace('\n', '\\n')
+            print(f"👶: {prompt_display}")
             print('🤖️: ', end='')
             model.generate(
                 inputs=inputs["input_ids"], attention_mask=inputs["attention_mask"],

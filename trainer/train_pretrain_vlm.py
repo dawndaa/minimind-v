@@ -22,6 +22,18 @@ warnings.filterwarnings('ignore')
 
 
 def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
+    """执行一次预训练 epoch。
+
+    Args:
+        epoch (int): 当前 epoch 序号，从 0 开始。
+        loader (DataLoader): 提供 ``(X, Y, loss_mask, pixel_values)`` 的迭代器。
+        iters (int): 每个 epoch 的总步数，用于 ETA 计算。
+        start_step (int): 断点恢复时的起始步数偏移。
+        wandb: 可选的 W&B 会话对象。
+
+    Notes:
+        - English reference: run a single pre-training epoch over provided dataloader.
+    """
     loss_fct = nn.CrossEntropyLoss(reduction='none')
     start_time = time.time()
     for step, (X, Y, loss_mask, pixel_values) in enumerate(loader, start=start_step + 1):
@@ -40,6 +52,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
                 Y.view(-1)
             ).view(Y.size())
 
+            # 只对助手回复部分计入损失，保持用户提示的前缀不被优化。
             loss = (loss * loss_mask).sum() / loss_mask.sum()
             loss += res.aux_loss
             loss = loss / args.accumulation_steps

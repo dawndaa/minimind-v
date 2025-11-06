@@ -6,12 +6,13 @@ from .model_minimind import *
 from typing import Optional, Tuple, List
 from torch import nn
 from transformers import CLIPProcessor, CLIPModel
-from typing import List
 
 warnings.filterwarnings('ignore')
 
 
 class VLMConfig(MiniMindConfig):
+    """MiniMind 多模态配置，额外记录视觉提示 token。"""
+
     model_type = "minimind-v"
 
     def __init__(
@@ -20,12 +21,27 @@ class VLMConfig(MiniMindConfig):
             image_ids: List = [34] * 196,
             **kwargs,
     ):
+        """设置图像 patch 占位符的默认文本形式。
+
+        Args:
+            image_special_token (str): Prompt 中替换 `<image>` 的特定字符序列。
+            image_ids (List): tokenizer 编码后对应的 token id 列表。
+            **kwargs: 透传给 ``MiniMindConfig`` 的其他参数。
+        """
         self.image_special_token = image_special_token
         self.image_ids = image_ids
         super().__init__(**kwargs)
 
 class VisionProj(nn.Module):
+    """线性映射头，将 CLIP patch 特征对齐到 LLM 隐藏维度。"""
+
     def __init__(self, ve_hidden_size=768, hidden_size=512):
+        """保存输入输出维度并构建线性层。
+
+        Args:
+            ve_hidden_size (int): 视觉编码器输出维度，例如 CLIP ViT 为 768。
+            hidden_size (int): 语言模型隐藏维度。
+        """
         super().__init__()
         self.ve_hidden_size = ve_hidden_size
         self.hidden_size = hidden_size
@@ -34,15 +50,31 @@ class VisionProj(nn.Module):
         )
 
     def forward(self, image_encoders):
+        """将一批 CLIP 特征映射到语言空间。
+
+        Args:
+            image_encoders (torch.Tensor): patch 级视觉特征 ``(bsz, patches, ve_hidden_size)``。
+
+        Returns:
+            torch.Tensor: 线性映射后的特征 ``(bsz, patches, hidden_size)``。
+        """
         vision_proj = self.vision_proj(image_encoders)
         return vision_proj
 
 
 # 继承自语言模型
 class MiniMindVLM(MiniMindForCausalLM):
+    """MiniMind 视觉-语言模型，将 CLIP 特征注入语言流。"""
+
     config_class = VLMConfig
 
     def __init__(self, params: VLMConfig = None, vision_model_path="./model/vision_model/clip-vit-base-patch16"):
+        """加载语言模型与 CLIP 编码器，并初始化投影层。
+
+        Args:
+            params (VLMConfig, optional): 多模态配置，默认构造。.
+            vision_model_path (str): 本地 CLIP checkpoint 路径。
+        """
         super().__init__(params)
         if not params: params = VLMConfig()
         self.params = params
@@ -51,6 +83,14 @@ class MiniMindVLM(MiniMindForCausalLM):
 
     @staticmethod
     def get_vision_model(model_path: str):
+        """加载 CLIP 主干并冻结参数以提升推理效率。
+
+        Args:
+            model_path (str): CLIP checkpoint 路径。
+
+        Returns:
+            Tuple[Optional[CLIPModel], Optional[CLIPProcessor]]: 成功时返回模型与处理器，否则 ``(None, None)``。
+        """
         from transformers import logging as hf_logging
         hf_logging.set_verbosity_error()
         if not os.path.exists(model_path):
@@ -64,19 +104,49 @@ class MiniMindVLM(MiniMindForCausalLM):
 
     @staticmethod
     def image2tensor(image, processor):
+        """将任意 PIL 图像转换为 CLIP 归一化 Tensor。
+
+        Args:
+            image (PIL.Image.Image): 输入图片。
+            processor (CLIPProcessor): CLIP 预处理器。
+
+        Returns:
+            torch.Tensor: 归一化后的像素 ``(1, 3, H, W)``。
+        """
         if image.mode in ['RGBA', 'LA']: image = image.convert('RGB')
         inputs = processor(images=image, return_tensors="pt")['pixel_values']
         return inputs
 
     @staticmethod
     def get_image_embeddings(image_tensors, vision_model):
+        """从冻结 CLIP 模型提取 patch-level embedding。
+
+        Args:
+            image_tensors (torch.Tensor): ``image2tensor`` 的输出。
+            vision_model (CLIPModel): 视觉编码器。
+
+        Returns:
+            torch.Tensor: 去掉 CLS 后的 patch 表示。
+        """
         with torch.no_grad():
             outputs = vision_model.vision_model(pixel_values=image_tensors)
         img_embedding = outputs.last_hidden_state[:, 1:, :].squeeze()
         return img_embedding
 
     def count_vision_proj(self, tokens, h, vision_tensors=None, seqlen=512):
+        """用视觉 patch embedding 替换 `<image>` 占位片段。
+
+        Args:
+            tokens (torch.Tensor): Prompt token 序列。
+            h (torch.Tensor): 语言嵌入序列。
+            vision_tensors (Optional[torch.Tensor]): 视觉特征。
+            seqlen (int): 输出长度上限。
+
+        Returns:
+            torch.Tensor: 注入视觉特征后的嵌入序列。
+        """
         def find_indices(tokens, image_ids):
+            """在 prompt 中定位 patch 占位区间。"""
             image_ids_tensor = torch.tensor(image_ids).to(tokens.device)
             len_image_ids = len(image_ids)
             if len_image_ids > tokens.size(1):
@@ -101,8 +171,10 @@ class MiniMindVLM(MiniMindForCausalLM):
                     img_idx = 0
                     for start_idx, end_idx in image_indices[i]:
                         if img_idx < vision_proj.size(1):
-                            h_i = torch.cat((h_i[:start_idx], vision_proj[i][img_idx], h_i[end_idx + 1:]), dim=0)[
-                                  :seqlen]
+                            # ``vision_proj`` already stores a sequence of
+                            # patch embeddings; we splice them into the
+                            # language sequence in place of the placeholders.
+                            h_i = torch.cat((h_i[:start_idx], vision_proj[i][img_idx], h_i[end_idx + 1:]), dim=0)[:seqlen]
                             img_idx += 1
                     new_h.append(h_i)
                 else:
@@ -118,6 +190,20 @@ class MiniMindVLM(MiniMindForCausalLM):
                 logits_to_keep: Union[int, torch.Tensor] = 0,
                 pixel_values: Optional[torch.FloatTensor] = None,
                 **args):
+        """在语言 forward 过程中融合视觉特征。
+
+        Args:
+            input_ids (Optional[torch.Tensor]): 文本 token 序列。
+            attention_mask (Optional[torch.Tensor]): 注意力掩码。
+            past_key_values (Optional[List[Tuple[torch.Tensor, torch.Tensor]]]): 历史 KV。
+            use_cache (bool): 是否返回新的 KV。
+            logits_to_keep (Union[int, torch.Tensor]): 输出 logits 的切片范围。
+            pixel_values (Optional[torch.FloatTensor]): 图像像素 ``(bsz, num_img, 3, H, W)``。
+            **args: 透传到语言模型的其它参数。
+
+        Returns:
+            transformers.modeling_outputs.CausalLMOutputWithPast: 包含融合结果。
+        """
         batch_size, seq_length = input_ids.shape
         if hasattr(past_key_values, 'layers'): past_key_values = None
         past_key_values = past_key_values or [None] * len(self.model.layers)
