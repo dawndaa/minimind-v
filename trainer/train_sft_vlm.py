@@ -22,6 +22,18 @@ warnings.filterwarnings('ignore')
 
 
 def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
+    """执行一次监督微调（SFT）训练循环。
+
+    Args:
+        epoch (int): 当前 epoch 序号。
+        loader (DataLoader): SFT 数据迭代器。
+        iters (int): 每个 epoch 的总步数。
+        start_step (int): 断点恢复时的步数偏移。
+        wandb: 可选的 W&B 记录器。
+
+    Notes:
+        - English reference: fine-tune MiniMind-VLM for one supervised epoch.
+    """
     loss_fct = nn.CrossEntropyLoss(reduction='none')
     start_time = time.time()
     for step, (X, Y, loss_mask, pixel_values) in enumerate(loader, start=start_step + 1):
@@ -40,6 +52,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
                 Y.view(-1)
             ).view(Y.size())
 
+            # 与预训练阶段一致，仅统计助手回答部分的语言模型损失。
             loss = (loss * loss_mask).sum() / loss_mask.sum()
             loss += res.aux_loss
             loss = loss / args.accumulation_steps
